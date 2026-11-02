@@ -1,313 +1,179 @@
-# Choosing Without Ground Truth: A Self-Ranked Vision–Language Judge for Post-hoc Recipes in Self-Supervised Low-Dose CT Denoising
+# Rank2Denoise: Choosing Band-wise Post-hoc Recipes without Ground Truth for Self-supervised Low-dose CT Denoising
 
-> **Status:** Research code for a manuscript submitted to **IEEE ISBI 2027** (under review).
-> This repository is **private**. Please do not share the code, data or results outside the author group.
+> Manuscript submitted to **IEEE ISBI 2027** (4 pages, references included).
+> Code: <https://github.com/itu-biai/Rank2Denoise-VLM-judge-denoising>
 
-## Authors
+## The problem
 
-1. **Batuhan Gedik**
-2. **Mehmet Ozan Ünal**
-3. **Dr. Metin Ertaş**
-4. **Assoc. Prof. Dr. İsa Yıldırım**
+Paired low-dose / normal-dose CT data are rare. For this reason, self-supervised denoisers
+(Noise2Self, Noise2Void, Neighbor2Neighbor, Recorrupted-to-Recorrupted, Blind2Unblind, Self2Self)
+learn from noisy images only. Each method has its own noise assumption. Reconstructed CT noise is
+spatially correlated, so different denoisers remove different parts of the noise.
 
-Department of Electronics and Communication Engineering and
-Biomedical Imaging and AI Laboratory (BIAI Lab),
-Istanbul Technical University, Istanbul, Turkey
+To choose and combine these denoisers, we need a **judge**. In practice, this judge is PSNR
+against clean images. Thus the ground truth (GT), which self-supervision avoids, comes back at the
+selection step.
 
----
+Existing GT-free judges do not fit this setting:
 
-## Table of Contents
+- Risk estimates such as PURECOMB assume independent noise.
+- The J-invariant loss scores one network, not a mix of networks.
+- Learned quality scores need other supervision: CLIP-IQA uses text, RAVE uses sets of good and
+  poor images, and SSIQA trains a regressor of CT noise level.
 
-- [Overview](#overview)
-- [Key Results](#key-results)
-- [Method](#method)
-- [Repository Structure](#repository-structure)
-- [Requirements](#requirements)
-- [Data](#data)
-- [Reproducing the Results](#reproducing-the-results)
-- [Where Ground Truth Is Used](#where-ground-truth-is-used)
-- [Limitations](#limitations)
-- [Ethics and Data Use](#ethics-and-data-use)
-- [Acknowledgments](#acknowledgments)
-- [Contact](#contact)
+**Goal:** choose and combine self-supervised denoisers **without any clean image**.
 
----
+## The idea
 
-## Overview
+When we add noise to a noisy slice, the copy is surely worse than the slice. In the embedding space
+of a frozen medical vision–language model (**MedSigLIP-448**), the mean difference between noisy
+slices and their noisier copies is therefore a **"less noisy" direction**. We learn this direction
+with no text, no clean image and no explicit noise model.
 
-Self-supervised denoisers for low-dose CT (LDCT) learn from noisy images only. However, their
-outputs are usually **tuned by measuring PSNR against clean reference images**. Once this
-happens, the pipeline is no longer free of ground truth (GT).
-
-This project replaces the GT-based judge with a **frozen medical vision–language model (VLM)**.
-The judge is a MedSigLIP-448 image embedding, projected onto a *"less noisy"* direction. This
-direction is learned **only from noisy slices and their re-noised copies**. It uses no clean
-image and no text.
-
-The judge selects a short post-hoc **recipe**: a sequence of small blending moves between two
-self-supervised experts:
-
-- **C0**: a J-invariant U-Net trained with the Noise2Self loss, and
-- **N2N**: the same U-Net trained with the Neighbor2Neighbor loss.
-
-The recipe is selected on validation slices **without reading their clean images**. At test time,
-the fixed recipe needs neither the VLM nor GT; it only adds pixel operations.
-
-## Key Results
-
-Results on 220 test slices (31 patients), mean ± std over three C0 seeds (42, 123, 456).
-All numbers are taken from `article/figures/table_main.tex` and `article/figures/table_judges.tex`.
-
-| Method | GT used | PSNR (dB) ↑ | Δ vs. C0 (dB) ↑ | SSIM ↑ | LPIPS ↓ |
-| --- | --- | --- | --- | --- | --- |
-| Noisy input | – | 23.04 | – | 0.742 | 0.284 |
-| N2N (seed 42) | no | 27.84 | – | 0.815 | 0.136 |
-| C0 (J-invariant) | no | 28.54 ± 0.05 | 0 | 0.826 | 0.113 |
-| C0 + VLM loss term (seed 42) | no | 28.55 | +0.06 | 0.818 | 0.114 |
-| **Ours, global recipe** | **no** | **29.04 ± 0.06** | **+0.51 ± 0.02** | **0.841** | **0.101** |
-| *Q*-selected, global | no | 29.05 ± 0.03 | +0.51 ± 0.03 | 0.840 | 0.101 |
-| PSNR-selected, global | val | 29.07 ± 0.02 | +0.54 ± 0.02 | 0.841 | 0.100 |
-| GT oracle (per slice, not a method) | test | 29.33 ± 0.03 | +0.79 ± 0.02 | 0.854 | 0.079 |
-
-**Main findings**
-
-- Without any clean image, the VLM-selected recipe improves **every test slice and every
-  patient in all three seeds** (smallest slice gain: +0.29 to +0.33 dB).
-- It keeps **87–101%** of the gain of the same search judged by validation PSNR.
-- The same VLM used as a **training loss** adds at most **+0.06 dB**. In other words, the VLM is
-  useful as a *judge*, not as a *loss*.
-- On the C0–N2N blend line, our judge is the best GT-free judge we tested. It beats random
-  directions, a text-prompt score, an equal blend and the classical no-reference index *Q*
-  (+0.02 dB, 95% CI [+0.01, +0.04]).
-- It **ties** with *Q* in the full greedy search and **fails** in a small wide-window group
-  (see [Limitations](#limitations)).
+The projection on this direction gives a score. The score **ranks** candidate images (hence the
+name *Rank2Denoise*) and steers a greedy search over small post-hoc moves towards several denoisers.
+The judge only selects the recipe. At test time, the fixed recipe needs no VLM and no GT.
 
 ## Method
 
 The method has three stages (Fig. 1 of the paper).
 
-**(a) Judge direction from train-noisy slices.**
-For every train-noisy slice $y_i$, we take the noise field of C0, $n_i = y_i - \hat{x}_J(y_i)$.
-A re-noised copy adds the field of another random slice $k$, flipped left–right with probability
-0.5: $y_i^{+} = \mathrm{clip}(y_i + \pi(n_k), 0, 1)$. Because $y_i^{+}$ is noisier than $y_i$,
-the mean embedding difference points towards lower noise:
+### (a) Judge direction — noisy training slices, no GT
+
+For each noisy training slice $y_i$, the N2S noise field is $n_i = y_i - \hat{x}_S(y_i)$.
+A re-noised copy adds the noise field of another random slice $k$, randomly flipped ($\pi$):
+$y_i^{+} = \mathrm{clip}(y_i + \pi(n_k), 0, 1)$. Because $y_i^{+}$ is noisier, the mean embedding
+difference points towards cleaner images:
 
 $$
 w = \frac{\sum_i \big(\phi(y_i) - \phi(y_i^{+})\big)}{\big\lVert \sum_i \big(\phi(y_i) - \phi(y_i^{+})\big) \big\rVert_2},
 \qquad s(x) = \langle \phi(x), w \rangle
 $$
 
-Here $\phi(\cdot) \in \mathbb{R}^{1152}$ is the $\ell_2$-normalised MedSigLIP-448 image embedding.
-Before the judge sees an image, the four $8 \times 8$ corners are set to zero. Each C0 seed has
-its own $w$.
+$\phi$ is the L2-normalised MedSigLIP-448 image embedding. Before scoring, the $8\times8$ corners
+of the slice are set to zero; the slice is resized to $448\times448$, copied to three channels and
+scaled to $[-1, 1]$. A larger $s$ means a less noisy image. Each N2S seed has its own $w$.
 
-**(b) Greedy recipe search on validation slices.**
-Starting from the C0 output, five candidate moves are tested at each step:
+### (b) Two-stage greedy search — validation slices, no GT
 
-| Move | Definition |
+A recipe is a list of **moves**. Each move changes the current image a little (step $\alpha = 0.1$)
+and is clipped to $[0, 1]$.
+
+- **Stage 1** starts from the N2S output and uses five global moves: blend towards the noisy input,
+  the N2N output or the N2S output; Gaussian smoothing ($\sigma = 0.5$ px); a high-frequency boost
+  (ideal radial high-pass above 0.25 cycles/pixel).
+- **Stage 2** adds 15 band moves: one band (low, mid or high) of the difference to one of five
+  experts (wavelet, N2V, R2R, S2S, B2U). The low band is made zero-mean, so no move shifts the mean
+  grey level.
+- **Region rule.** Band moves are not applied on the background and on organ boundaries. The
+  region mask $m$ is computed once from the N2S output, without GT. Without this mask, band moves
+  shift the background grey level and blur boundaries.
+
+At each step, the move with the best mean score $\bar{s}$ over the validation slices is kept. A
+stage stops when $\bar{s}$ no longer rises, or after 30 moves.
+
+### (c) Test — fixed recipe, no VLM, no GT
+
+The selected recipe is applied to the outputs of the seven experts.
+
+### Experts
+
+| Expert | Description |
 | --- | --- |
-| Blend towards noisy input | $x + \alpha(y - x)$ |
-| Blend towards N2N | $x + \alpha(\hat{x}_N - x)$ |
-| Blend towards C0 | $x + \alpha(\hat{x}_J - x)$ |
-| Gaussian smoothing | $g_\sigma * x$, $\sigma = 0.5$ px |
-| High-frequency boost | $x + \alpha\,\mathcal{F}^{-1}[\mathbb{1}_{\lVert\kappa\rVert > 0.25}\,\mathcal{F}x]$ |
+| N2S | U-Net, Noise2Self loss (two complementary checkerboard masks) — main expert |
+| N2N | Same U-Net, Neighbor2Neighbor loss |
+| N2V | Noise2Void |
+| R2R | Recorrupted-to-Recorrupted (re-corrupted with N2S noise fields) |
+| B2U | Blind2Unblind |
+| S2S | Dataset-level Self2Self variant |
+| Wavelet | BayesShrink wavelet thresholding |
 
-with $\alpha = 0.1$. The move with the highest mean judge score $\bar{s}$ is kept. The search
-stops when $\bar{s}$ does not increase, or after 30 moves.
+## Data and setup
 
-**(c) Test.** The fixed recipe is applied to the C0 and N2N outputs. No VLM and no GT are needed.
-
-## Repository Structure
-
-Paths are relative to the project root (`W17 ISBI_2027_plan/`). Only the parts used by the
-final paper are listed.
-
-```
-.
-├── src/                          # Shared library: U-Net, masking, Neighbor2Neighbor,
-│                                 #   re-noising, metrics, VLM wrappers, training loop
-├── scripts/                      # Step 1.x / 2.x notebook generators and helpers
-│   ├── make_step_1_4_notebook.py #   trains C0 (seed 42), N2N and the supervised U-Net
-│   ├── make_step_2_2_notebook.py #   builds the self-ranked direction w
-│   └── make_rank.py              #   computation of w and validation scores
-├── Diagnostics_2/
-│   ├── diag2_direction_search.py # The five recipe moves and the greedy search
-│   ├── composite_vlm/
-│   │   ├── src/                  # Copy of the shared library used by Diagnostics_2
-│   │   ├── scripts/              # rank_recipe.py, masked_rerun.py, masked_judges.py, ...
-│   │   └── make_*_notebook.py    # Colab notebook generators (one per experiment)
-│   ├── d2_19_judges/             # GT-free judge comparison on the C0–N2N blend line
-│   ├── d2_26_results/            # Corner-masked judge: w + recipe + test (3 seeds)
-│   └── d2_27_results/            # Corner-masked judges + dose check
-├── article/
-│   ├── main.tex, references.bib  # ISBI 2027 manuscript (official spconf template)
-│   ├── scripts/                  # Local inference, metrics, tables, figures, statistics
-│   ├── data/                     # CSV files behind every number in the paper
-│   └── figures/                  # Tables (.tex), figures and README_numbers.md
-└── tests/                        # Unit tests
-```
-
-> **Notebooks are generated, not edited by hand.** Each `.ipynb` file is produced by a
-> `make_*_notebook.py` generator, which embeds the code from `src/` and `scripts/`. If these
-> files change, the notebook must be generated again.
-
-## Requirements
-
-The GPU experiments were run on **Google Colab with an NVIDIA A100-SXM4-40GB**. The recorded
-environment of the judge experiments is:
-
-| Package | Version |
-| --- | --- |
-| Python | 3.13.15 |
-| PyTorch | 2.11.0 (CUDA 13.0) |
-| torchvision | 0.26.0 |
-| transformers | 4.57.6 (the notebooks install `transformers<5`) |
-| open_clip_torch | 3.3.0 |
-| huggingface_hub | 0.36.2 |
-| NumPy / SciPy / pandas | 2.1.3 / 1.16.3 / 2.2.3 |
-| scikit-image | 0.25.2 |
-
-The full `pip freeze` output is in `Diagnostics_2/judge_search/requirements_judge_search.txt`.
-
-**MedSigLIP access.** The judge uses [`google/medsiglip-448`](https://huggingface.co/google/medsiglip-448),
-which is a gated model on Hugging Face. You must accept its terms of use and log in with a
-Hugging Face token before running any VLM notebook.
-
-The local scripts in `article/scripts/` run on CPU and need only NumPy, pandas, SciPy,
-PyTorch, scikit-image and matplotlib.
-
-## Data
-
-We use **Mini-DeepLesion** from the **BIAILAB I2I 2025v1** release, which is derived from
-DeepLesion (Yan et al., 2018).
-
-- $512 \times 512$ slices, single channel, values in $[0, 1]$, stored as `.npz` files.
-- Simulated Poisson noise at $10^5$ photons (key `noisy_clipped_100k`); clean reference
-  under `gt_clipped`.
-- The noise is **spatially correlated** (lag-1 autocorrelation: 0.19 horizontal, 0.10 vertical).
-- **Patient-level split:** 647 train-noisy slices (80 patients), 182 validation (34),
+- 1301 DeepLesion slices ($512\times512$) with **10% dose** simulated following LoDoPaB-CT.
+- Each slice is clipped to its display window (mostly $[-175, 275]$ HU; $[-1500, 500]$ HU for 196
+  lung slices) and scaled to $[0, 1]$.
+- The noise is correlated: lag-1 autocorrelation 0.19 (horizontal) / 0.10 (vertical).
+- **Patient-level split:** 647 noisy training slices (80 patients), 182 validation (34),
   220 test (31).
-- **Window groups** (rule: minimum of the noisy input $> 0.1$ → wide): test 192 narrow / 28 wide;
-  validation 137 / 45.
+- N2S, N2N, N2V, R2R and B2U share one U-Net (7.70 M parameters; AdamW, learning rate $10^{-4}$,
+  batch 8, 30 epochs). Checkpoints are selected by their own loss on **noisy** validation data.
+- Seeds 42, 123 and 456. The search takes under one hour per seed on an A100.
+- PSNR and SSIM use a data range of 1; LPIPS uses AlexNet. Statistics: exact Wilcoxon signed-rank
+  test on per-patient paired differences and a patient-cluster bootstrap 95% CI (5000 draws).
 
-The dataset is **not included** in this repository. Expected location on Colab:
+## Main results
 
-```
-/content/drive/MyDrive/BI_AI/ayiklanan_dosyalar/minideeplesion/{train,val,test}/*.npz
-```
+Test set (220 slices, 31 patients), mean ± sample std over three seeds. *Gain*: PSNR gain (dB) over
+the equal blend (0.5 N2S + 0.5 N2N). Source: `figures/table_main.tex`.
 
-## Reproducing the Results
+| Method | GT used | PSNR (dB) ↑ | Gain | SSIM ↑ | LPIPS ↓ |
+| --- | --- | --- | --- | --- | --- |
+| Noisy input | – | 23.04 | – | 0.742 | 0.284 |
+| Supervised (same U-Net, MSE) | train | 31.47 | – | 0.874 | 0.113 |
+| N2S | no | 28.54 ± 0.05 | −0.48 | 0.826 | 0.113 |
+| S2S (best single denoiser) | no | 28.57 | −0.45 | 0.847 | 0.185 |
+| Equal blend | no | 29.02 ± 0.02 | 0 | 0.841 | 0.102 |
+| Equal blend, 7 experts | no | 28.48 ± 0.02 | −0.54 | 0.825 | 0.124 |
+| Band moves, no judge | no | 28.99 ± 0.02 | −0.03 | 0.838 | 0.106 |
+| **Rank2Denoise (ours)** | **no** | **29.49 ± 0.01** | **+0.47** | **0.853** | **0.098** |
+| Residual-variance judge | no | 28.84 ± 0.05 | −0.18 | 0.836 | 0.105 |
+| Random direction | no | 27.70 ± 0.86 | −1.32 | 0.827 | 0.141 |
+| ResNet-50 direction | no | 27.66 ± 0.05 | −1.36 | 0.830 | 0.180 |
+| Val.-PSNR judge (GT reference) | val | 29.66 ± 0.01 | +0.64 | 0.862 | 0.113 |
 
-### 1. Train the experts (Colab, GPU)
+**Key findings**
 
-| Notebook generator | What it does |
+- The recipe improves PSNR over the equal blend by **+0.47 dB** ($p < 10^{-7}$; 29 of 31 patients)
+  and SSIM from 0.841 to 0.853 ($p < 10^{-5}$).
+- It raises PSNR over N2S on **every one** of the 220 test slices and 31 patients.
+- It beats the best single denoiser (S2S) by **0.92 dB**, and a residual-variance judge in the same
+  search by **0.65 dB**.
+- It recovers **73%** of the gain of the GT reference judge, with a lower LPIPS (0.098 vs. 0.113).
+- Plain ensembling does not explain the gain: the average of all seven experts is below N2S, and
+  band moves without a judge stay at the equal blend.
+- The learned direction drives the gain: with a random or ResNet-50 direction, the search ends
+  below N2S.
+
+## Where ground truth is used
+
+| Step | GT used? |
 | --- | --- |
-| `scripts/make_step_1_4_notebook.py` | Trains C0 (seed 42), N2N (seed 42) and the supervised U-Net reference |
-| `Diagnostics_2/composite_vlm/make_c0_seeds_notebook.py` | Trains C0 with seeds 123 and 456 (no VLM; a T4 GPU is enough) |
+| Training the self-supervised experts | No |
+| Building the judge direction $w$ | No |
+| Region mask $m$ | No |
+| Selecting the recipe on validation slices | No |
+| Applying the recipe at test time | No |
+| Supervised reference | Yes (training) |
+| Val.-PSNR reference judge | Yes (validation GT) |
+| Test metrics | Yes (evaluation only) |
 
-Training setup: U-Net with 7.70 M parameters, AdamW, learning rate $10^{-4}$, batch size 8,
-30 epochs. The checkpoint is selected on the masked loss computed on **noisy** validation data.
-All training runs can be resumed at epoch level.
+## Scope
 
-### 2. Build the judge and select the recipe (Colab, A100)
+- Simulated noise at one dose, on one dataset, with one expert pool.
+- The clinical-dose GT is itself noisy (most visible in lung windows).
+- The region rule was designed after inspecting GT-based region errors of the unmasked test search.
+  Its validation signs support it, but a fresh test set should confirm its gain.
+- Next step: real scans and other doses.
 
-```bash
-python3 Diagnostics_2/composite_vlm/make_masked_rerun_notebook.py   # w + recipe + test, corner-masked judge, 3 seeds
-python3 Diagnostics_2/composite_vlm/make_masked_judges_notebook.py  # Table 2 embeddings + dose check
-```
+## Ethics
 
-Run the generated notebooks on Colab. Recipe selection takes about **10–15 minutes per seed**
-on one A100.
-
-### 3. Rebuild tables, figures and paper numbers (local, CPU)
-
-All scripts are run in isolated mode (`python -I`). Every number in `main.tex` is read from a CSV
-file; the mapping is documented in `article/figures/README_numbers.md`.
-
-```bash
-# Local test inference: C0 (3 seeds), N2N and supervised outputs
-python -I article/scripts/infer_test.py      <project_root> <minideeplesion/test> <infer_dir>
-
-# Per-slice PSNR / SSIM / LPIPS / R_H  →  data/table_per_slice.csv, data/table_per_seed.csv
-python -I article/scripts/table_metrics.py   <project_root> <infer_dir> <out_dir>
-
-# Table 1 (LaTeX)
-python -I article/scripts/make_table.py      <table_per_seed.csv> <direction_search_summary.csv> \
-                                             <q_global_metrics_per_slice.csv> article/figures/table_main.tex
-
-# Table 2 (LaTeX)
-python -I article/scripts/make_judge_table.py <judge_summary.csv> article/figures/table_judges.tex
-
-# Numbers in the text: gains, patient-cluster bootstrap CIs, Wilcoxon tests
-python -I article/scripts/paper_numbers.py   <table_per_slice.csv> <out.csv>
-python -I article/scripts/compare_judges.py  <project_root> <infer_dir> <out_dir>
-
-# Figure 2 (zoomed test examples) and parity checks
-python -I article/scripts/make_figures.py    <Diagnostics_2> <infer_dir> <out_dir>
-
-# Check that the window threshold could be chosen from train/val inputs alone
-python -I article/scripts/window_threshold_check.py <minideeplesion_root> <out.csv>
-```
-
-### 4. Compile the paper
-
-The manuscript uses the official ISBI LaTeX kit (`spconf.sty`, `IEEEbib.bst`):
-
-```bash
-cd article
-pdflatex main && bibtex main && pdflatex main && pdflatex main
-```
-
-### Evaluation protocol
-
-- PSNR and SSIM use `data_range = 1.0`; LPIPS uses AlexNet.
-- $R_H$ is the output/GT power ratio in the 0.25–0.5 cycles/pixel band
-  ($< 1$: over-smoothed, $> 1$: residual noise).
-- Confidence intervals are **patient-cluster bootstrap** 95% CIs (5000 draws) of paired per-slice
-  differences.
-- Seeds: 42, 123, 456.
-
-## Where Ground Truth Is Used
-
-GT-free operation is the central claim of this work, so we list every use of clean images:
-
-| Stage | GT used? |
-| --- | --- |
-| Training C0 and N2N | **No** |
-| Building the judge direction $w$ | **No** |
-| Selecting the recipe on validation data | **No** (only `noisy_clipped_100k` is loaded) |
-| Applying the recipe at test time | **No** |
-| Supervised U-Net reference | Yes (training) |
-| PSNR-selected and GT-oracle references | Yes (validation / test GT) |
-| Dose check of the judge (simulated doses) | Yes; it does not change $w$ |
-| All reported test metrics | Yes (evaluation only) |
-
-Three design choices followed test results: one $w$ per seed, the corner mask, and the global
-recipe as the main form. For this reason, the test numbers are not a fully independent estimate.
-
-## Limitations
-
-- The noise is **simulated**; we use **one dataset** and **one N2N run**.
-- The judge is the weak point. In the wide-window group (28 test slices), a group recipe selected
-  by the VLM judge starts with Gaussian smoothing and **loses 0.15 ± 0.02 dB**, while the global
-  recipe gains +0.58 ± 0.04 dB. Here the VLM score rewards blur.
-- With one shared $w$ for all seeds, one seed lost 0.24 dB; without the corner mask, seed 123
-  gained only +0.14 dB.
-- A second dataset is needed to confirm the fixed method.
-
-## Ethics and Data Use
-
-This retrospective study uses only public DeepLesion images (BIAILAB I2I 2025v1 release).
-No new data were collected and no separate ethical approval was obtained. Users of this code must
-follow the DeepLesion terms of use.
+This retrospective study uses only public DeepLesion images with simulated noise. No new data were
+collected; no separate ethical approval was obtained.
 
 ## Acknowledgments
 
-No funding was received, and the authors declare no conflicts of interest. Generative AI
-(Claude, Anthropic) helped write analysis code and draft and edit the text; the authors checked
-all code, numbers and text.
+No funding; no conflicts of interest. Generative AI (Claude, Anthropic) helped write code and text;
+the authors checked all of it.
 
-## Contact
+## Authors and contributions
 
-For questions about this repository, please contact the first author, **Batuhan Gedik**
-(Biomedical Imaging and AI Laboratory, Istanbul Technical University).
+| Author | Affiliation | Contribution |
+| --- | --- | --- |
+| **Batuhan Gedik** | ¹ ² | Planning, method development, implementation, experiments, analysis and writing |
+| Mehmet Ozan Ünal | ¹ ² | Review |
+| Metin Ertaş | ² | Review |
+| İsa Yıldırım | ¹ ² | Review |
+
+¹ Department of Electronics and Communication Engineering, Istanbul Technical University
+² Biomedical Imaging and AI Laboratory (BIAI Lab), Istanbul, Turkey
