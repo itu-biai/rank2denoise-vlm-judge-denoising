@@ -1,0 +1,51 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the paper below."
+title: "Rank2Denoise: choosing band-wise post-hoc recipes without ground truth for self-supervised low-dose CT denoising"
+type: software
+authors:
+  - family-names: Gedik
+    given-names: Batuhan
+    orcid: "https://orcid.org/0009-0005-1451-1287"
+    affiliation: "Istanbul Technical University; Biomedical Imaging and AI Laboratory (BIAI Lab)"
+  - family-names: Ünal
+    given-names: Mehmet Ozan
+    orcid: "https://orcid.org/0000-0003-2984-0444"
+    affiliation: "Istanbul Technical University; Biomedical Imaging and AI Laboratory (BIAI Lab)"
+  - family-names: Ertaş
+    given-names: Metin
+    orcid: "https://orcid.org/0000-0003-4031-4656"
+    affiliation: "Biomedical Imaging and AI Laboratory (BIAI Lab)"
+  - family-names: Yıldırım
+    given-names: İsa
+    orcid: "https://orcid.org/0000-0002-3286-7245"
+    affiliation: "Istanbul Technical University; Biomedical Imaging and AI Laboratory (BIAI Lab)"
+version: "1.0.0"
+license: CC-BY-NC-4.0
+repository-code: "https://github.com/itu-biai/rank2denoise-vlm-judge-denoising"
+abstract: "This research uses a vision language model (VLM) as a judge to choose and combine denoising algorithms for low-dose CT without ground truth."
+keywords:
+  - low-dose CT
+  - self-supervised denoising
+  - vision language model
+  - no-reference quality
+  - model selection
+preferred-citation:
+  type: conference-paper
+  title: "Rank2Denoise: choosing band-wise post-hoc recipes without ground truth for self-supervised low-dose CT denoising"
+  authors:
+    - family-names: Gedik
+      given-names: Batuhan
+      orcid: "https://orcid.org/0009-0005-1451-1287"
+    - family-names: Ünal
+      given-names: Mehmet Ozan
+      orcid: "https://orcid.org/0000-0003-2984-0444"
+    - family-names: Ertaş
+      given-names: Metin
+      orcid: "https://orcid.org/0000-0003-4031-4656"
+    - family-names: Yıldırım
+      given-names: İsa
+      orcid: "https://orcid.org/0000-0002-3286-7245"
+  conference:
+    name: "IEEE International Symposium on Biomedical Imaging (ISBI)"
+  year: 2027
+  status: submitted

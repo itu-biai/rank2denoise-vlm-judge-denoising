@@ -1,0 +1,10 @@
+# Python / tooling caches
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+
+# Data and pipeline outputs (default folders of src/paths.py and README)
+data/
+results/
+out/
